@@ -18,6 +18,8 @@ using namespace std;
 
 #define INSIDE(__mat__, __row__, __col__) ((((__row__) >= 0) && ((__row__) < __mat__.rows)) && (((__col__) >= 0) && ((__col__) < __mat__.cols)))
 
+#define LINE_SEG_QUANTIZE_M 50
+
 cv::Mat RectPano::RectWarpping(cv::Mat& input)
 {
 	cv::Mat img = Resize(input);       // return resized image (fit to bounding box)
@@ -440,18 +442,18 @@ void RectPano::MeshBackwardWarpping(Mat & dm, Grid & meshGrid)
 }
 
 
-bool intersection(Point2f& o1, Point2f& o2, Point2f& p1, Point2f& p2, Point2f &intersection)
+bool intersection(Point2f& p0, Point2f& p1, Point2f& p2, Point2f& p3, Point2f &intersection)
 {
-	Point2f x = o2 - o1;
-	Point2f d1 = p1 - o1;
-	Point2f d2 = p2 - o2;
+	Point2f x = p2 - p0;
+	Point2f d1 = p1 - p0;
+	Point2f d2 = p3 - p2;
 
 	float cross = d1.x*d2.y - d1.y*d2.x;
-	if (abs(cross) < 0.001)
+	if (abs(cross) < 0.0001)
 		return false;
 
 	double t1 = (x.x * d2.y - x.y * d2.x) / cross;
-	intersection = o1 + d1 * t1;
+	intersection = p0 + d1 * t1;
 
 	return true;
 }
@@ -462,18 +464,19 @@ cv::Mat RectPano::GlobalWarpping(cv::Mat & img, Grid & meshGrid)
 	cout << "\t Detecting Line Segments....";
 	vector<Grid::Line> lineSegments;
 	LineDetect(img, meshGrid, lineSegments);
+
+	float orientBin[LINE_SEG_QUANTIZE_M] = { 0 };
+
 	cout << "\r\t Detecting Line Segments...Done." << endl;
 
-	return ShowMeshGrid(img, meshGrid);
-
 	Grid warppedGrid(meshGrid);
-	int iterations = 1;
-	for (int iter = 0; iter < 1; iter++) {
-		cout << "\t Solving Energy Function..." << ((iter * 3) / (iterations * 3.0f)) << "                   \r";
-		SolveShapeAndBound(img, warppedGrid);
-		cout << "\t Solving Energy Function..." << ((iter * 3 + 1) / (iterations * 3.0f)) << "                   \r";
-		//SolveLine(meshGrid);
-		cout << "\t Solving Energy Function..." << ((iter * 3 + 2) / (iterations * 3.0f)) << "                   \r";
+	int iterations = 4;
+	for (int iter = 0; iter < iterations; iter++) {
+		cout << "\t Solving Energy Function..." << ((iter * 3) * 100 / (iterations * 3)) << "%                   \r";
+		SolveEnergy(img, warppedGrid, lineSegments, orientBin);
+		cout << "\t Solving Energy Function..." << ((iter * 3 + 1) * 100 / (iterations * 3)) << "%                   \r";
+		SolveLineTheta(img, warppedGrid, lineSegments, orientBin);
+		cout << "\t Solving Energy Function..." << ((iter * 3 + 2) * 100 / (iterations * 3)) << "%                   \r";
 	}
 	cout << "\t Solving Energy Function...Done.                   " << endl;
 
@@ -508,16 +511,16 @@ cv::Mat RectPano::GlobalWarpping(cv::Mat & img, Grid & meshGrid)
 
 	cout << "Global Warpping...Done." << endl;
 
-	return ShowMeshGrid(result, warppedGrid);
+	return result;// ShowMeshGrid(result, warppedGrid);
 }
 
 using namespace ximgproc;
 void RectPano::LineDetect(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line>& lineSegs)
 {
-	int    length_threshold = 10;
+	int    length_threshold = 20;
 	float  distance_threshold = 1.41421356f;
 	double canny_th1 = 50.0;
-	double canny_th2 = 50.0;
+	double canny_th2 = 80.0;
 	int    canny_aperture_size = 3;
 	bool   do_merge = false;
 
@@ -536,7 +539,7 @@ void RectPano::LineDetect(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line
 
 	// keep lines inside border
 #pragma region RemoveOutliner
-	vector<Grid::Line> lines_inside;
+	vector<Vec4f> lines_inside;
 	int testRange = 5;
 	int testSamples[4][2] = {
 		{-testRange,-testRange},
@@ -575,10 +578,7 @@ void RectPano::LineDetect(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line
 		}
 
 		if (!outside) {
-			Grid::Line l;
-			l.points[0] = Point2f(lines[i][0], lines[i][1]);
-			l.points[1] = Point2f(lines[i][2], lines[i][3]);
-			lines_inside.push_back(l);
+			lines_inside.push_back(lines[i]);
 		}
 	}
 #pragma endregion
@@ -586,123 +586,249 @@ void RectPano::LineDetect(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line
 	// break lines into line segments intersecting with grid quads
 #pragma region Line Intersection
 	for (int i = 0; i < lines_inside.size(); i++) {
-
-		Grid::Line& l = lines_inside[i];
-		bool intersected = false;
 		Point2f intersectPoint;
-
 		// loop all 
 		for (int j = 0; j < meshGrid.quads.size(); j++) {
-			Point2f& v0 = meshGrid.vertices[meshGrid.quads[j].verts[0]];
-			Point2f& v1 = meshGrid.vertices[meshGrid.quads[j].verts[1]];
-			Point2f& v2 = meshGrid.vertices[meshGrid.quads[j].verts[2]];
-			Point2f& v3 = meshGrid.vertices[meshGrid.quads[j].verts[3]];
+			Point2f l0(lines_inside[i][0], lines_inside[i][1]);
+			Point2f l1(lines_inside[i][2], lines_inside[i][3]);
 
-			if (intersection(l.points[0], l.points[1], v0, v1, intersectPoint)) {
-				intersected = true;
+			bool append = true;
+			for (int k = 0; k < 4; k++) {
+				Point2f& v0 = meshGrid.vertices[meshGrid.quads[j].verts[k]];
+				Point2f& v1 = meshGrid.vertices[meshGrid.quads[j].verts[(k+1)&3]];
+
+				bool inside0 = !((v0 - v1).cross((v0 - l0)) < 0);
+				bool inside1 = !((v0 - v1).cross((v0 - l1)) < 0);
+
+				// have intersection or all inside
+				if (!inside0 && !inside1) {
+					append = false;
+					break;
+				}
+
+				if (!inside0) {
+					if (intersection(l0, l1, v0, v1, intersectPoint)) {
+						l0 = intersectPoint;
+					}
+					else {
+						append = false;
+						break;
+					}
+				}
+				else if (!inside1) {
+					if (intersection(l0, l1, v0, v1, intersectPoint)) {
+						l1 = intersectPoint;
+					}
+					else {
+						append = false;
+						break;
+					}
+				}
+				
 			}
-		}
 
-		if (!intersected) {
-			lineSegs.push_back(l);
+			if (append) {
+				Grid::Line line;
+				
+				line.qIdx = j;
+
+				// to quad uv space
+				Point2f uv_l0 = meshGrid.ConvertToQuadSpace(j, l0);
+				Point2f uv_l1 = meshGrid.ConvertToQuadSpace(j, l1);
+
+				Point2f vec = (l1 - l0);
+				float angle = atan2(vec.y, vec.x) * 57.29578f;
+
+				if (angle < 90 && angle >= -90) {
+					line.points[0] = l0;
+					line.points[1] = l1;
+
+					line.uv_points[0] = uv_l0;
+					line.uv_points[1] = uv_l1;
+				}
+				else {
+					line.points[0] = l1;
+					line.points[1] = l0;
+
+					line.uv_points[0] = uv_l1;
+					line.uv_points[1] = uv_l0;
+
+					if (angle >= 90) {
+						angle -= 180;
+					}
+					else if (angle < -90) {
+						angle += 180;
+					}
+				}
+
+				line.angle = angle;
+				line.mIdx = ((angle + 90) * LINE_SEG_QUANTIZE_M/ 180.0f);
+
+				//line.angle = line.mIdx * 180.0f / LINE_SEG_QUANTIZE_M;
+
+				lineSegs.push_back(line);
+			}
+			
 		}
 	}
 #pragma endregion
 
-	for (int i = 0; i < lineSegs.size(); i++) {
+	// Debug Draw
+	/*for (int i = 0; i < lineSegs.size(); i++) {
 		Grid::Line& l = lineSegs[i];
-		cv::line(img, l.points[0] , l.points[1], Scalar(0, 0, 255, 255), 1);
-	}
+		cv::line(img, l.points[0], l.points[1], Scalar(0, 0, 255, 255), 1);
+		cv::circle(img, l.points[0], 1, Scalar(255, 0, 0, 255));
+		cv::circle(img, l.points[1], 1, Scalar(255,0,0,255));
+	}*/
 }
 
-void RectPano::SolveShapeAndBound(cv::Mat & img, Grid & meshGrid)
+void RectPano::SolveEnergy(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin)
 {
-	// Shape & boundary Energy
-
 	// init matrix
+
 	int Qs = meshGrid.quads.size();
 	int Vs = meshGrid.vertices.size();
+	int Ls = lineSegs.size();
 	int W = meshGrid.width;
 	int H = meshGrid.height;
 
-	Mat E = Mat::zeros(Qs * 8 + H * 2 + W * 2, Vs * 2, CV_32F);
+	Mat E = Mat::zeros(Qs * 8 + Ls * 2 + H * 2 + W * 2, Vs * 2, CV_32F);
 	Mat V = Mat::zeros(Vs * 2, 1, CV_32F);
-	Mat b = Mat::zeros(Qs * 8 + H * 2 + W * 2, 1, CV_32F);
+	Mat b = Mat::zeros(Qs * 8 + Ls * 2 + H * 2 + W * 2, 1, CV_32F);
 
-	// init quad parts
-	Mat Aq(8, 4, CV_32F);
-	Mat I = Mat::eye(8, 8, CV_32F); // identity matrix
-	for (int qIdx = 0; qIdx < Qs; qIdx++) {
-		Grid::Quad& quad = meshGrid.quads[qIdx];
+	// init shape preserving part
+	{
+		Mat Aq(8, 4, CV_32F);
+		Mat I = Mat::eye(8, 8, CV_32F); // identity matrix
+		for (int qIdx = 0; qIdx < Qs; qIdx++) {
+			Grid::Quad& quad = meshGrid.quads[qIdx];
 
-		for (int j = 0; j < 4; j++) {
-			int vIdx = quad.verts[j];
-
-			Point2f& v = meshGrid.vertices[vIdx];
-
-			Aq.at<float>(j * 2, 0) = v.x;
-			Aq.at<float>(j * 2, 1) = -v.y;
-			Aq.at<float>(j * 2, 2) = 1;
-			Aq.at<float>(j * 2, 3) = 0;
-
-			Aq.at<float>(j * 2 + 1, 0) = v.y;
-			Aq.at<float>(j * 2 + 1, 1) = v.x;
-			Aq.at<float>(j * 2 + 1, 2) = 0;
-			Aq.at<float>(j * 2 + 1, 3) = 1;
-
-		}
-
-		Mat M = Aq * (Aq.t() * Aq).inv() * Aq.t() - I;
-		for (int i = 0; i < 8; i++) {
 			for (int j = 0; j < 4; j++) {
 				int vIdx = quad.verts[j];
 
-				float x = M.at<float>(i, j * 2);
-				float y = M.at<float>(i, j * 2 + 1);
+				Point2f& v = meshGrid.vertices[vIdx];
 
-				E.at<float>(qIdx * 8 + i, vIdx * 2)     = x;
-				E.at<float>(qIdx * 8 + i, vIdx * 2 + 1) = y;
+				Aq.at<float>(j * 2, 0) = v.x;
+				Aq.at<float>(j * 2, 1) = -v.y;
+				Aq.at<float>(j * 2, 2) = 1;
+				Aq.at<float>(j * 2, 3) = 0;
+
+				Aq.at<float>(j * 2 + 1, 0) = v.y;
+				Aq.at<float>(j * 2 + 1, 1) = v.x;
+				Aq.at<float>(j * 2 + 1, 2) = 0;
+				Aq.at<float>(j * 2 + 1, 3) = 1;
+
 			}
-		}
 
+			Mat M = Aq * (Aq.t() * Aq).inv() * Aq.t() - I;
+			for (int i = 0; i < 8; i++) {
+				for (int j = 0; j < 4; j++) {
+					int vIdx = quad.verts[j];
+
+					float x = M.at<float>(i, j * 2);
+					float y = M.at<float>(i, j * 2 + 1);
+
+					E.at<float>(qIdx * 8 + i, vIdx * 2) = x;
+					E.at<float>(qIdx * 8 + i, vIdx * 2 + 1) = y;
+				}
+			}
+
+		}
+	}
+
+	// init Line preserving part
+	{
+		int rowOffset = Qs * 8;
+		float weightL = 1;
+
+		Mat ev(2, 1, CV_32F);
+		Mat R(2, 2, CV_32F);
+		Mat I = Mat::eye(2, 2, CV_32F); // identity matrix
+		for (int lIdx = 0; lIdx < Ls; lIdx++) {
+			Grid::Line& l = lineSegs[lIdx];
+
+			float theta = orientBin[l.mIdx];
+
+			Point2f& uv0 = l.uv_points[0];
+			Point2f& uv1 = l.uv_points[1];
+
+			int vIdx0 = meshGrid.quads[l.qIdx].verts[0];
+			int vIdx1 = meshGrid.quads[l.qIdx].verts[1];
+			int vIdx2 = meshGrid.quads[l.qIdx].verts[2];
+			int vIdx3 = meshGrid.quads[l.qIdx].verts[3];
+
+			ev.at<float>(0, 0) = l.points[1].x - l.points[0].x;
+			ev.at<float>(1, 0) = l.points[1].y - l.points[0].y;
+
+			R.at<float>(0, 0) = cos(theta);
+			R.at<float>(0, 1) = -sin(theta);
+			R.at<float>(1, 0) = sin(theta);
+			R.at<float>(1, 1) = cos(theta);
+
+			Mat C = R * ev * (ev.t() * ev).inv() * ev.t() * R.t() - I;
+
+			for (int j = 0; j < 2; j++) {
+				float c0 = weightL * C.at<float>(j, 0);
+				float c1 = weightL * C.at<float>(j, 1);
+
+				//v* v0* (1 - u)
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx0 * 2) = c0 * (((1 - uv1.x) * (uv1.y)) - ((1 - uv0.x) * (uv0.y)));
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx0 * 2 + 1) = c1 * (((1 - uv1.x) * (uv1.y)) - ((1 - uv0.x) * (uv0.y)));
+
+				// v * v1 * u
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx1 * 2) = c0 * (((uv1.x) * (uv1.y)) - ((uv0.x) * (uv0.y)));
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx1 * 2+1) = c1 * (((uv1.x) * (uv1.y)) - ((uv0.x) * (uv0.y)));
+
+				//(1 - v) * v2 * u
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx2 * 2) = c0 * (((uv1.x) * (1 - uv1.y)) - ((uv0.x) * (1 - uv0.y)));
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx2 * 2+1) = c1 * (((uv1.x) * (1 - uv1.y)) - ((uv0.x) * (1 - uv0.y)));
+
+				//(1 - v)* v3* (1 - u)
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx3 * 2) = c0 * (((1 - uv1.x) * (1 - uv1.y)) - ((1 - uv0.x) * (1 - uv0.y)));
+				E.at<float>(rowOffset + lIdx * 2 + j, vIdx3 * 2+1) = c1 * (((1 - uv1.x) * (1 - uv1.y)) - ((1 - uv0.x) * (1 - uv0.y)));
+			}
+
+		}
 	}
 
 	// init bounding parts
-	int rowOffset = Qs * 8;
-	float weightB = 100;
-	// left
-	for (int i = 0; i < H; i++) {
-		int vIdx = i * W;
+	{
+		int rowOffset = Qs * 8 + Ls * 2;
+		float weightB = 100;
+		// left
+		for (int i = 0; i < H; i++) {
+			int vIdx = i * W;
 
-		E.at<float>(rowOffset + i, vIdx * 2) = weightB;
-		b.at<float>(rowOffset + i, 0) = 0;
-	}
-	rowOffset = rowOffset + H;
+			E.at<float>(rowOffset + i, vIdx * 2) = weightB;
+			b.at<float>(rowOffset + i, 0) = 0;
+		}
+		rowOffset = rowOffset + H;
 
-	// right
-	for (int i = 0; i < H; i++) {
-		int vIdx = i * W + W - 1;
+		// right
+		for (int i = 0; i < H; i++) {
+			int vIdx = i * W + W - 1;
 
-		E.at<float>(rowOffset + i, vIdx * 2) = weightB;
-		b.at<float>(rowOffset + i, 0) = (img.cols - 1) * weightB;
-	}
-	rowOffset = rowOffset + H;
+			E.at<float>(rowOffset + i, vIdx * 2) = weightB;
+			b.at<float>(rowOffset + i, 0) = (img.cols - 1) * weightB;
+		}
+		rowOffset = rowOffset + H;
 
-	// bottom
-	for (int i = 0; i < W; i++) {
-		int vIdx = i;
+		// bottom
+		for (int i = 0; i < W; i++) {
+			int vIdx = i;
 
-		E.at<float>(rowOffset + i, vIdx * 2 + 1) = weightB;
-		b.at<float>(rowOffset + i, 0) = 0;
-	}
-	rowOffset = rowOffset + W;
+			E.at<float>(rowOffset + i, vIdx * 2 + 1) = weightB;
+			b.at<float>(rowOffset + i, 0) = 0;
+		}
+		rowOffset = rowOffset + W;
 
-	// top
-	for (int i = 0; i < W; i++) {
-		int vIdx = (H - 1) * W + i;
+		// top
+		for (int i = 0; i < W; i++) {
+			int vIdx = (H - 1) * W + i;
 
-		E.at<float>(rowOffset + i, vIdx * 2 + 1) = weightB;
-		b.at<float>(rowOffset + i, 0) = (img.rows - 1) * weightB;
+			E.at<float>(rowOffset + i, vIdx * 2 + 1) = weightB;
+			b.at<float>(rowOffset + i, 0) = (img.rows - 1) * weightB;
+		}
 	}
 
 
@@ -718,9 +844,32 @@ void RectPano::SolveShapeAndBound(cv::Mat & img, Grid & meshGrid)
 	}
 }
 
-void RectPano::SolveLine(Grid & meshGrid)
+void RectPano::SolveLineTheta(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin)
 {
-	// Line Energy
+	int orientBinLen[LINE_SEG_QUANTIZE_M] = {0};
+
+	for (int i = 0; i < LINE_SEG_QUANTIZE_M; i++) {
+		orientBin[i] = 0;
+	}
+
+	for (Grid::Line& l : lineSegs) {
+
+		Point2f vec0 = (l.points[1] - l.points[0]);
+		Point2f vec1 = (meshGrid.ConvertToImageSpace(l.qIdx, l.uv_points[1]) - meshGrid.ConvertToImageSpace(l.qIdx, l.uv_points[0]));
+
+		float dot = vec0.x * vec1.x + vec0.y * vec1.y;
+		float det = vec0.x * vec1.y - vec0.y * vec1.x;
+		float theta = atan2(det, dot);
+
+		orientBin[l.mIdx] += theta;
+		orientBinLen[l.mIdx] += 1;
+	}
+
+	for (int i = 0; i < LINE_SEG_QUANTIZE_M; i++) {
+		if (orientBinLen[i] > 0) {
+			orientBin[i] /= orientBinLen[i];
+		}
+	}
 
 }
 
@@ -864,10 +1013,6 @@ int RectPano::Grid::FindClosestQuad(Point2f p)
 	return minIdx;
 }
 
-float Cross(Point2f v, Point2f w)
-{
-	return v.x * w.y - v.y * w.x;
-}
 Point2f RectPano::Grid::ConvertToQuadSpace(int qIdx, Point2f p)
 {
 	Point2f& v0 = vertices[quads[qIdx].verts[3]];
@@ -881,9 +1026,9 @@ Point2f RectPano::Grid::ConvertToQuadSpace(int qIdx, Point2f p)
 	Point2f b3 = v0 - v1 - v2 + v3;
 
 	// Set up quadratic formula
-	float A = Cross(b2, b3);
-	float B = Cross(b3, q) - Cross(b1, b2);
-	float C = Cross(b1, q);
+	float A = b2.cross(b3);
+	float B = b3.cross(q) - b1.cross(b2);
+	float C = b1.cross(q);
 
 	// Solve for v
 	Point2f uv;

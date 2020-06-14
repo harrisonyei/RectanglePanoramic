@@ -30,6 +30,10 @@ class RectPano {
 
 		struct Line {
 			cv::Point2f points[2];
+			cv::Point2f uv_points[2];
+			int qIdx;
+			int mIdx;
+			float angle;
 		};
 
 		std::vector<cv::Point2f> vertices;
@@ -61,8 +65,9 @@ private:
 	void MeshBackwardWarpping(cv::Mat& dm, Grid& meshGrid);
 	cv::Mat GlobalWarpping(cv::Mat& img, Grid& meshGrid);
 	void LineDetect(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs);
-	void SolveShapeAndBound(cv::Mat& img, Grid& meshGrid);
-	void SolveLine(Grid& meshGrid);
+	void LineQuantize(std::vector<Grid::Line>& lineSegs);
+	void SolveEnergy(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin);
+	void SolveLineTheta(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin);
 
 
 	cv::Mat ShowMeshGrid(cv::Mat& img, Grid& meshGrid);
