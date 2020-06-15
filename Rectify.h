@@ -66,8 +66,11 @@ private:
 	cv::Mat GlobalWarpping(cv::Mat& img, Grid& meshGrid);
 	void LineDetect(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs);
 	void LineQuantize(std::vector<Grid::Line>& lineSegs);
+
+	void SolveWarpping(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin, int iterations);
 	void SolveEnergy(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin);
 	void SolveLineTheta(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin);
+	void StretchReduction(cv::Mat& img, Grid& meshGrid, Grid& warppedMeshGrid, cv::Mat& targetImg);
 
 
 	cv::Mat ShowMeshGrid(cv::Mat& img, Grid& meshGrid);

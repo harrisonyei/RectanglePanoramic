@@ -51,7 +51,7 @@ cv::Mat RectPano::Resize(cv::Mat& img)
 
 	LOOP_MAT(img) {
 		Vec4b& color = img.at<Vec4b>(row, col);
-		if (color[3] != 0) {
+		if (color[3] == 255) {
 			boundingBox.T = max(row, boundingBox.T);
 			boundingBox.B = min(row, boundingBox.B);
 
@@ -96,7 +96,8 @@ cv::Mat RectPano::LocalWarpping(cv::Mat& img)
 	LOOP_MAT(res) {
 		Vec4b& color = res.at<Vec4b>(row, col);
 		Vec2i& disp  = dm.at<Vec2i>(row, col);
-		if (color[3] == 0) {
+		if (color[3] < 255) {
+			color = Vec4b(0,0,255,255);
 			for (int i = -1; i <= 1; i++) {
 				for (int j = -1; j <= 1; j++) {
 
@@ -110,7 +111,7 @@ cv::Mat RectPano::LocalWarpping(cv::Mat& img)
 					Vec4b& kcolor = res.at<Vec4b>(krow, kcol);
 					if (kcolor[3] > 0) {
 						Vec2i& kdisp = dm.at<Vec2i>(krow, kcol);
-						color = kcolor;
+						//color = kcolor;
 						disp = kdisp;
 						i = j = 2; // break
 						break;
@@ -127,10 +128,11 @@ cv::Mat RectPano::LocalWarpping(cv::Mat& img)
 		visualDm.at<Vec4b>(row, col) = Vec4b(0, abs(disp[0]), abs(disp[1]),255);
 	}
 
-	imshow("DM", visualDm);
+	//imshow("DM", visualDm);
+	//waitKey();
+	//destroyWindow("DM");
 	imshow("SC", res);
 	waitKey();
-	destroyWindow("DM");
 	destroyWindow("SC");
 
 	return dm;
@@ -167,7 +169,7 @@ void RectPano::FindBoundarySide(cv::Mat& img, int srow, int erow, int scol, int 
 			Vec4b& color = img.at<Vec4b>(row, col);
 
 			// if alpha is empty, continue counting
-			if (color[3] == 0) {
+			if (color[3] < 255) {
 				length += 1;
 				if (isRowSides) {
 					crow = row;
@@ -226,7 +228,7 @@ cv::Mat RectPano::Gradient(cv::Mat & img)
 
 		Vec4b& color = img.at<Vec4b>(row, col);
 
-		if (color[3] == 0) {
+		if (color[3] < 255) {
 			gI[0] = INT_MAX;
 			gI[1] = INT_MAX;
 		}
@@ -382,7 +384,7 @@ void RectPano::LocalSeamCarving(cv::Mat & img, cv::Mat & grad, cv::Mat & dm, Bou
 		}
 	}
 
-	float gain = 2.5f;
+	float gain = 1.5f;
 	// apply seam
 	if (isRowSides) {
 		bool isShiftLeft = (bound.L == 0);
@@ -514,24 +516,38 @@ cv::Mat RectPano::GlobalWarpping(cv::Mat & img, Grid & meshGrid)
 
 	cout << "\r\t Detecting Line Segments...Done." << endl;
 
-	Grid warppedGrid(meshGrid);
-	int iterations = 8;
-	for (int iter = 0; iter < iterations; iter++) {
-		cout << "\t Solving Energy Function..." << ((iter * 3) * 100 / (iterations * 3)) << "%                   \r";
-		SolveEnergy(img, warppedGrid, lineSegments, orientBin);
-		cout << "\t Solving Energy Function..." << ((iter * 3 + 1) * 100 / (iterations * 3)) << "%                   \r";
-		SolveLineTheta(img, warppedGrid, lineSegments, orientBin);
-		cout << "\t Solving Energy Function..." << ((iter * 3 + 2) * 100 / (iterations * 3)) << "%                   \r";
-	}
-	cout << "\t Solving Energy Function...Done.                   " << endl;
 
+	Grid warppedGrid(meshGrid);
+	int iterations = 10;
+	SolveWarpping(img, warppedGrid, lineSegments, orientBin, iterations);
+
+	Mat target;
+	StretchReduction(img, meshGrid, warppedGrid, target);
+
+	SolveWarpping(target, warppedGrid, lineSegments, orientBin, iterations);
+
+// Warpping Image from input mesh to solved mesh
 #pragma region ImageWarpping
 	cout << "\t Warpping Image....";
-	// Warpping Image from input mesh to solved mesh
+	// inpaint image
+	Mat fillMask = Mat::zeros(img.rows, img.cols, CV_8U);
+	LOOP_MAT(img) {
+		Vec4b& color = img.at<Vec4b>(row, col);
+		if (color[3] < 255) {
+			color = Vec4b(0, 0, 255, 255);
+			fillMask.at<uchar>(row, col) = 255;
+		}
+	}
+
 	Mat rgbImg;
 	cv::cvtColor(img, rgbImg, COLOR_BGRA2BGR);
-	Mat result = img.clone();
-	LOOP_MAT(rgbImg) {
+
+	cv::inpaint(rgbImg, fillMask, rgbImg, 7, INPAINT_TELEA);
+	//imshow("inpaint0", rgbImg);
+
+	Mat result = target.clone();
+	fillMask = Mat::zeros(result.rows, result.cols, CV_8U);
+	LOOP_MAT(target) {
 		Point2f warppedPixel(col, row);
 
 		int qIdx = warppedGrid.FindClosestQuad(warppedPixel);
@@ -545,12 +561,16 @@ cv::Mat RectPano::GlobalWarpping(cv::Mat & img, Grid & meshGrid)
 			cv::getRectSubPix(rgbImg, cv::Size(1, 1), imgPixel, patch);
 			Vec3b& color = patch.at<Vec3b>(0, 0);
 
-			result.at<Vec4b>(row, col) = Vec4b(color[0], color[1], color[2], 255);
+			result.at<Vec3b>(row, col) = color;
 		}
 		else {
-			result.at<Vec4b>(row, col) = Vec4b(255, 0, 0, 255);
+			result.at<Vec3b>(row, col) = Vec3b(255, 0, 0);
+			fillMask.at<uchar>(row, col) = 255;
 		}
 	}
+
+	cv::inpaint(result, fillMask, result, 5, INPAINT_TELEA);
+
 	cout << "\r\t Warpping Image...Done." << endl;
 #pragma endregion
 
@@ -607,7 +627,7 @@ void RectPano::LineDetect(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line
 
 				if (INSIDE(img, krow, kcol)) {
 					Vec4b& color = img.at<Vec4b>(krow, kcol);
-					if (color[3] == 0) {
+					if (color[3] < 255) {
 						sampleInside = false;
 						break;
 					}
@@ -727,6 +747,18 @@ void RectPano::LineDetect(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line
 		cv::circle(img, l.points[0], 1, Scalar(255, 0, 0, 255));
 		cv::circle(img, l.points[1], 1, Scalar(255,0,0,255));
 	}*/
+}
+
+void RectPano::SolveWarpping(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin, int iterations)
+{
+	for (int iter = 0; iter < iterations; iter++) {
+		cout << "\t Solving Energy Function..." << ((iter * 3) * 100 / (iterations * 3)) << "%                   \r";
+		SolveEnergy(img, meshGrid, lineSegs, orientBin);
+		cout << "\t Solving Energy Function..." << ((iter * 3 + 1) * 100 / (iterations * 3)) << "%                   \r";
+		SolveLineTheta(img, meshGrid, lineSegs, orientBin);
+		cout << "\t Solving Energy Function..." << ((iter * 3 + 2) * 100 / (iterations * 3)) << "%                   \r";
+	}
+	cout << "\t Solving Energy Function...Done.                   " << endl;
 }
 
 void RectPano::SolveEnergy(cv::Mat & img, Grid & meshGrid, std::vector<Grid::Line>& lineSegs, float* orientBin)
@@ -916,6 +948,61 @@ void RectPano::SolveLineTheta(cv::Mat& img, Grid& meshGrid, std::vector<Grid::Li
 		if (orientBinLen[i] > 0) {
 			orientBin[i] /= orientBinLen[i];
 		}
+	}
+
+}
+
+void RectPano::StretchReduction(cv::Mat& img, Grid& meshGrid, Grid& warppedMeshGrid, cv::Mat& target)
+{
+	float Sx = 0;
+	float Sy = 0;
+
+	for (int i = 0; i < meshGrid.quads.size(); i++) {
+		float maxXo = 0;
+		float minXo = img.cols;
+		float maxYo = 0;
+		float minYo = img.rows;
+
+		float maxXw = 0;
+		float minXw = img.cols;
+		float maxYw = 0;
+		float minYw = img.rows;
+
+		for (int j = 0; j < 4; j++) {
+			Point2f& o = meshGrid.vertices[meshGrid.quads[i].verts[j]]; // origin
+			Point2f& w = warppedMeshGrid.vertices[warppedMeshGrid.quads[i].verts[j]]; // warpped
+
+			maxXo = max(maxXw, o.x); maxXw = max(maxXw, w.x);
+			minXo = min(minXo, o.x); minXw = min(minXw, w.x);
+			maxYo = max(maxYo, o.y); maxYw = max(maxYw, w.y);
+			minYo = min(minYo, o.y); minYw = min(minYw, w.y);
+		}
+
+		Sx += ((maxXw - minXw) / (maxXo - minXo));
+		Sy += ((maxYw - minYw) / (maxYo - minYo));
+	}
+
+	Sx /= meshGrid.quads.size();
+	Sy /= meshGrid.quads.size();
+
+	Sx = max(Sx, 1.0f);
+	Sy = max(Sy, 1.0f);
+
+	// round to image size
+	int newCols = ceil(img.cols / Sx);
+	int newRows = ceil(img.rows / Sy);
+
+	cout << "\t Stretch Img" << newCols << "  " << newRows << endl;
+
+	target = Mat(newRows, newCols, CV_8UC3);
+
+	// update scale
+	Sx = img.cols / (float)newCols;
+	Sy = img.rows / (float)newRows;
+
+	for (int i = 0; i < meshGrid.vertices.size(); i++) {
+		warppedMeshGrid.vertices[i].x /= Sx;
+		warppedMeshGrid.vertices[i].y /= Sy;
 	}
 
 }
