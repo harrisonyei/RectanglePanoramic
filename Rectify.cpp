@@ -8,11 +8,8 @@ using namespace std;
 
 #define GRAY(_R_, _G_, _B_) (((_R_) * 0.27) + ((_G_) * 0.67) + ((_B_) * 0.06))
 
-#define LOOP_MAT(__mat__) for(unsigned int row=0;row<(__mat__).rows;row++)\
-                                for(unsigned int col=0;col<(__mat__).cols;col++)
-
-#define LOOP_BOUNDARY(__bound__) for(unsigned int row=(__bound__).B;row<=(__bound__).T;row++)\
-                                for(unsigned int col=(__bound__).L;col<=(__bound__).R;col++) 
+#define LOOP_MAT(__mat__) for(int row=0;row<(__mat__).rows;row++)\
+                                for(int col=0;col<(__mat__).cols;col++)
 
 #define IMG_BOUNDARY(__mat__, __bound__) (__mat__).colRange((__bound__).L, (__bound__).R + 1).rowRange((__bound__).B, (__bound__).T + 1)
 
@@ -28,9 +25,19 @@ cv::Mat RectPano::RectWarpping(cv::Mat& input)
 	cout << "Mesh Backward Warpping....";
 	Grid meshGrid(img, 20, 20);
 	MeshBackwardWarpping(dm, meshGrid);
+	
+	imshow("Mesh Warpping", ShowMeshGrid(img, meshGrid));
+	waitKey();
+	destroyWindow("Mesh Warpping");
+	
 	cout << "\rMesh Backward Warpping...Done." << endl;
 
 	Mat result = GlobalWarpping(img, meshGrid);
+
+	imshow("Global Warpping", ShowMeshGrid(result, meshGrid));
+	waitKey();
+	destroyWindow("Global Warpping");
+
 	return result;
 }
 
@@ -61,22 +68,31 @@ cv::Mat RectPano::Resize(cv::Mat& img)
 cv::Mat RectPano::LocalWarpping(cv::Mat& img)
 {
 	Mat res = img.clone(); // for seam carving
-	Mat dm(res.rows, res.cols, CV_32SC2); // displacement map
+	Mat dm = Mat::zeros(res.rows, res.cols, CV_32SC2); // displacement map
+
+	Mat grad = Gradient(res); // img XY gradient
 
 	cout << endl << "Local Warpping....";
-	for (int iter = 0; iter < 999999; iter++) {
+	for (int iter = 0; ; iter++) {
 		Boundary bound = FindBoundarySegment(res);
 		int area = bound.area();
+
 		if (area > 1) {
-			Mat grad = Gradient(res); // img XY gradient
 			LocalSeamCarving(res, grad, dm, bound);
+			
+			/*imshow("Seam Carving", res);
+
+			waitKey();
+
+			destroyWindow("Seam Carving");*/
+			
 		}
 		else {
 			break;
 		}
 	}
 
-	// fill missing pixels with nearest neighbor
+	// fill missing pixels from neighbor
 	LOOP_MAT(res) {
 		Vec4b& color = res.at<Vec4b>(row, col);
 		Vec2i& disp  = dm.at<Vec2i>(row, col);
@@ -105,10 +121,17 @@ cv::Mat RectPano::LocalWarpping(cv::Mat& img)
 	}
 	cout << "\rLocal Warpping...Done."<< endl;
 
-	/*LOOP_MAT(dm) { // visaulize displacment map
+	Mat visualDm = res.clone();
+	LOOP_MAT(dm) { // visaulize displacment map
 		Vec2i& disp = dm.at<Vec2i>(row, col);
-		res.at<Vec4b>(row, col) = Vec4b(abs(disp[0]) + abs(disp[1]),0,0,255);
-	}*/
+		visualDm.at<Vec4b>(row, col) = Vec4b(0, abs(disp[0]), abs(disp[1]),255);
+	}
+
+	imshow("DM", visualDm);
+	imshow("SC", res);
+	waitKey();
+	destroyWindow("DM");
+	destroyWindow("SC");
 
 	return dm;
 }
@@ -293,8 +316,8 @@ void RectPano::LocalSeamCarving(cv::Mat & img, cv::Mat & grad, cv::Mat & dm, Bou
 				seamCol = col;
 			}
 		}
-
-		for (int row = bound.T; row > bound.B; row--) {
+		//cout << "\t" << "Append Seam " << bound.T << " , " << bound.B << endl;
+		for (int row = bound.T; row >= bound.B; row--) {
 			Vec2f& Sum_idx = gradSum.at<Vec2f>(row, seamCol);
 			seam.push_back(Vec2i(seamCol, row));
 			seamCol += Sum_idx[1];
@@ -351,13 +374,15 @@ void RectPano::LocalSeamCarving(cv::Mat & img, cv::Mat & grad, cv::Mat & dm, Bou
 			}
 		}
 
-		for (int col = bound.R; col > bound.L; col--) {
+		//cout << "\t" << "Append Seam "  << bound.R  << " , " << bound.L << endl;
+		for (int col = bound.R; col >= bound.L; col--) {
 			Vec2f& Sum_idx = gradSum.at<Vec2f>(seamRow, col);
 			seam.push_back(Vec2i(col, seamRow));
 			seamRow += Sum_idx[1];
 		}
 	}
 
+	float gain = 2.5f;
 	// apply seam
 	if (isRowSides) {
 		bool isShiftLeft = (bound.L == 0);
@@ -375,10 +400,15 @@ void RectPano::LocalSeamCarving(cv::Mat & img, cv::Mat & grad, cv::Mat & dm, Bou
 				Mat sub_dm0 = dm.rowRange(p[1], p[1] + 1).colRange(0, p[0]);
 				Mat sub_dm1 = dm.rowRange(p[1], p[1] + 1).colRange(1, p[0] + 1).clone();
 				sub_dm1.copyTo(sub_dm0);
-
 				for (int col = 0; col < p[0]; col++) {
 					dm.at<cv::Vec2i>(p[1], col)[0] -= 1;
 				}
+
+				grad.at<Vec2f>(p[1], p[0]) *= gain;
+				Mat sub_grad0 = grad.rowRange(p[1], p[1] + 1).colRange(0, p[0]);
+				Mat sub_grad1 = grad.rowRange(p[1], p[1] + 1).colRange(1, p[0] + 1).clone();
+				sub_grad1.copyTo(sub_grad0);
+				//grad.at<Vec2f>(p[1], p[0]) = Vec2f(INT_MAX, INT_MAX);
 			}
 			else {
 				Mat sub_img0 = img.rowRange(p[1], p[1] + 1).colRange(p[0] + 1, img.cols);
@@ -388,10 +418,15 @@ void RectPano::LocalSeamCarving(cv::Mat & img, cv::Mat & grad, cv::Mat & dm, Bou
 				Mat sub_dm0 = dm.rowRange(p[1], p[1] + 1).colRange(p[0] + 1, img.cols);
 				Mat sub_dm1 = dm.rowRange(p[1], p[1] + 1).colRange(p[0], img.cols - 1).clone();
 				sub_dm1.copyTo(sub_dm1);
-
 				for (int col = p[0]+1; col < img.cols; col++) {
 					dm.at<cv::Vec2i>(p[1], col)[0] += 1;
 				}
+
+				grad.at<Vec2f>(p[1], p[0]) *= gain;
+				Mat sub_grad0 = grad.rowRange(p[1], p[1] + 1).colRange(p[0] + 1, img.cols);
+				Mat sub_grad1 = grad.rowRange(p[1], p[1] + 1).colRange(p[0], img.cols - 1).clone();
+				sub_grad1.copyTo(sub_grad0);
+				//grad.at<Vec2f>(p[1], p[0]) = Vec2f(INT_MAX, INT_MAX);
 			}
 
 		}
@@ -408,10 +443,15 @@ void RectPano::LocalSeamCarving(cv::Mat & img, cv::Mat & grad, cv::Mat & dm, Bou
 				Mat sub_dm0 = dm.colRange(p[0], p[0] + 1).rowRange(0, p[1]);
 				Mat sub_dm1 = dm.colRange(p[0], p[0] + 1).rowRange(1, p[1] + 1).clone();
 				sub_dm1.copyTo(sub_dm0);
-
 				for (int row = 0; row < p[1]; row++) {
 					dm.at<cv::Vec2i>(row, p[0])[1] -= 1;
 				}
+
+				grad.at<Vec2f>(p[1], p[0]) *= gain;
+				Mat sub_grad0 = grad.colRange(p[0], p[0] + 1).rowRange(0, p[1]);
+				Mat sub_grad1 = grad.colRange(p[0], p[0] + 1).rowRange(1, p[1] + 1).clone();
+				sub_grad1.copyTo(sub_grad0);
+				//grad.at<Vec2f>(p[1], p[0]) = Vec2f(INT_MAX, INT_MAX);
 			}
 			else {
 				Mat sub_img0 = img.colRange(p[0], p[0] + 1).rowRange(p[1] + 1, img.rows);
@@ -421,10 +461,15 @@ void RectPano::LocalSeamCarving(cv::Mat & img, cv::Mat & grad, cv::Mat & dm, Bou
 				Mat sub_dm0 = dm.colRange(p[0], p[0] + 1).rowRange(p[1] + 1, img.rows);
 				Mat sub_dm1 = dm.colRange(p[0], p[0] + 1).rowRange(p[1], img.rows - 1).clone();
 				sub_dm1.copyTo(sub_dm0);
-
 				for (int row = p[1]+1; row < img.rows; row++) {
 					dm.at<cv::Vec2i>(row, p[0])[1] += 1;
 				}
+
+				grad.at<Vec2f>(p[1], p[0]) *= gain;
+				Mat sub_grad0 = grad.colRange(p[0], p[0] + 1).rowRange(p[1] + 1, img.rows);
+				Mat sub_grad1 = grad.colRange(p[0], p[0] + 1).rowRange(p[1], img.rows - 1).clone();
+				sub_grad1.copyTo(sub_grad0);
+				//grad.at<Vec2f>(p[1], p[0]) = Vec2f(INT_MAX, INT_MAX);
 			}
 		}
 	}
@@ -470,7 +515,7 @@ cv::Mat RectPano::GlobalWarpping(cv::Mat & img, Grid & meshGrid)
 	cout << "\r\t Detecting Line Segments...Done." << endl;
 
 	Grid warppedGrid(meshGrid);
-	int iterations = 4;
+	int iterations = 8;
 	for (int iter = 0; iter < iterations; iter++) {
 		cout << "\t Solving Energy Function..." << ((iter * 3) * 100 / (iterations * 3)) << "%                   \r";
 		SolveEnergy(img, warppedGrid, lineSegments, orientBin);
@@ -511,7 +556,9 @@ cv::Mat RectPano::GlobalWarpping(cv::Mat & img, Grid & meshGrid)
 
 	cout << "Global Warpping...Done." << endl;
 
-	return result;// ShowMeshGrid(result, warppedGrid);
+	meshGrid = warppedGrid;
+
+	return result;
 }
 
 using namespace ximgproc;
@@ -976,9 +1023,6 @@ RectPano::Grid::Grid(Grid & g)
 
 int RectPano::Grid::FindClosestQuad(Point2f p)
 {
-	float minDistance = INT_MAX;
-	int minIdx = -1;
-
 	for (int i = 0; i < quads.size(); i++) {
 
 		bool inside = true;
@@ -986,12 +1030,15 @@ int RectPano::Grid::FindClosestQuad(Point2f p)
 			Point2f& v0 = vertices[quads[i].verts[j]];
 			Point2f& v1 = vertices[quads[i].verts[(j+1)&3]];
 
-			float cross = (v0 - v1).cross((v0 - p));
+			Point2f vec = (v0 - v1);
+			if (vec.x * vec.x + vec.y * vec.y > 2) {
+				float cross = vec.cross((v0 - p));
 
-			// clockwise
-			if (cross < 0) {
-				inside = false;
-				break;
+				// clockwise
+				if (cross < 0) {
+					inside = false;
+					break;
+				}
 			}
 		}
 
@@ -1003,14 +1050,12 @@ int RectPano::Grid::FindClosestQuad(Point2f p)
 				distance += (v.x - p.x) * (v.x - p.x) + (v.y - p.y) * (v.y - p.y);
 			}
 
-			if (distance < minDistance) {
-				minDistance = distance;
-				minIdx = i;
-			}
+			return i;
+
 		}
 	}
 
-	return minIdx;
+	return -1;
 }
 
 Point2f RectPano::Grid::ConvertToQuadSpace(int qIdx, Point2f p)

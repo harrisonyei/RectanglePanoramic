@@ -15,10 +15,10 @@ class RectPano {
 	class Boundary {
 	public:
 		Boundary(unsigned int i = 0);
-		unsigned int T;
-		unsigned int B;
-		unsigned int L;
-		unsigned int R;
+		int T;
+		int B;
+		int L;
+		int R;
 		int area();
 	};
 
